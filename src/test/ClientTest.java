@@ -46,7 +46,17 @@ public class ClientTest extends JFrame {
 	}
 
 	public void configClient() {
-		client = new Client("130.110.235.176", 25565);
+		String portStr = JOptionPane.showInputDialog("Enter server port");
+		String ipAddr = JOptionPane.showInputDialog("Enter server IP");
+		int port = 3000;
+
+		try {
+			port = Integer.parseInt(portStr);
+		} catch (NumberFormatException e) {
+		}
+
+		// "130.110.235.176"
+		client = new Client(ipAddr, port);
 
 		client.addTaskHandler("msg", (body) -> {
 			JOptionPane.showMessageDialog(null, body);

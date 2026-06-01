@@ -7,6 +7,7 @@ import javax.swing.AbstractListModel;
 import javax.swing.JButton;
 import javax.swing.JFrame;
 import javax.swing.JList;
+import javax.swing.JOptionPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
@@ -107,12 +108,19 @@ public class ServerTest extends JFrame {
 	}
 
 	public void configServer() {
-		server = new Server(25565);
+		String portStr = JOptionPane.showInputDialog("Enter server port");
+		int port = 3000;
+		
+		try {
+			port = Integer.parseInt(portStr);
+		} catch (NumberFormatException e) {}
+		
+		server = new Server(port);
 
 		server.addEventHandler(Server.EVENT.NEW_CLIENT, this::refreshConnectionList);
 		server.addEventHandler(Server.EVENT.FORGOTTEN_CLIENT, this::refreshConnectionList);
 
-		System.out.println("Server at :25565");
+		System.out.println("Server at :" + port);
 	}
 
 	public void refreshConnectionList(Object eventData) {
