@@ -15,7 +15,7 @@ import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.alvarobarrerotanarro.tcpcommander.server.Server.EVENT;
+import com.alvarobarrerotanarro.tcpcommander.server.Task;
 
 public class Client implements AutoCloseable {
 	public static enum EVENT {
@@ -33,13 +33,11 @@ public class Client implements AutoCloseable {
 
 	final private AtomicBoolean running;
 	final private AtomicBoolean connected;
-	final private Object connectedMonitor;
 
-	final private Thread connectionThread;
-	final private Thread readThread;
+	final private Thread socketThread;
 	final private Thread tasksThread;
 
-	final private BlockingQueue<String> tasks;
+	final private BlockingQueue<Task> tasks;
 	final private Map<String, Consumer<String>> taskHandlers;
 
 	final private ConcurrentHashMap<EVENT, Consumer<Object>> eventHandlers;
@@ -52,21 +50,18 @@ public class Client implements AutoCloseable {
 
 		running = new AtomicBoolean(true);
 		connected = new AtomicBoolean(false);
-		connectedMonitor = new Object();
 
-		tasks = new LinkedBlockingDeque<String>();
+		tasks = new LinkedBlockingDeque<>();
 		taskHandlers = new HashMap<>();
 
 		eventHandlers = new ConcurrentHashMap<>();
 
 		logger = Logger.getLogger(Client.class.getName());
 
-		connectionThread = new Thread(this::connectLoop);
-		readThread = new Thread(this::readLoop);
+		socketThread = new Thread(this::connectLoop);
 		tasksThread = new Thread(this::tasksLoop);
 
-		connectionThread.start();
-		readThread.start();
+		socketThread.start();
 		tasksThread.start();
 	}
 
@@ -124,23 +119,25 @@ public class Client implements AutoCloseable {
 					socket = new Socket(ipAddr, port);
 					writer = new PrintWriter(socket.getOutputStream(), true);
 					reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-
-					connected.set(true);
 					dispatchEvent(EVENT.CONN_STATUS_CHANGE, true);
 					logger.info("CONNECTED");
 
-					synchronized (connectedMonitor) {
-						connectedMonitor.notifyAll();
-						while (connected.get() && running.get()) {
-							connectedMonitor.wait();
-						}
-					}
-
+					connected.set(true);
+					dispatchEvent(EVENT.CONN_STATUS_CHANGE, true);
+					readLoop();
+					connected.set(false);
+					dispatchEvent(EVENT.CONN_STATUS_CHANGE, false);
 				} catch (IOException e) {
 					logger.warning(e.getMessage());
 				}
 
 				Thread.sleep(RECONNECT_INTERVAL_MILLIS);
+			}
+
+			try {
+				socket.close();
+			} catch (IOException e) {
+				logger.info(e.getMessage());
 			}
 
 		} catch (InterruptedException e2) {
@@ -153,41 +150,34 @@ public class Client implements AutoCloseable {
 
 		try {
 
-			while (running.get()) {
-
-				synchronized (connectedMonitor) {
-					while (!connected.get() && running.get()) {
-						connectedMonitor.wait();
-					}
-				}
+			while (running.get() && connected.get()) {
 
 				try {
 					String line = reader.readLine();
 
 					if (line == null) {
-
 						connected.set(false);
-						dispatchEvent(EVENT.CONN_STATUS_CHANGE, true);
-						synchronized (connectedMonitor) {
-							connectedMonitor.notifyAll();
+					} else {
+
+						if (line.equals("ping")) {
+							pong();
+							logger.info("PONG");
+						} else {
+
+							try {
+								Task task = Task.parse(line);
+								tasks.add(task);
+							} catch (Exception e) {
+								logger.warning("TASK PARSING ERROR");
+							}
+
 						}
 
-					} else if (line.equals("ping")) {
-						pong();
-						logger.info("PONG");
-					} else {
-						tasks.add(line);
 					}
 
 				} catch (IOException e) {
-					logger.severe(e.getMessage());
-
 					connected.set(false);
-					dispatchEvent(EVENT.CONN_STATUS_CHANGE, true);
-					synchronized (connectedMonitor) {
-						connectedMonitor.notifyAll();
-					}
-
+					logger.severe(e.getMessage());
 				}
 
 				Thread.sleep(READ_INTERVAL_MILLIS);
@@ -203,17 +193,13 @@ public class Client implements AutoCloseable {
 		try {
 			while (running.get()) {
 
-				String task = tasks.take();
+				Task task = tasks.take();
+				logger.info(String.format("'%s' RETRIEVAL", task.toString()));
 
-				if (task.contains(":")) {
-					String taskName = task.substring(0, task.indexOf(":")).trim();
-					String taskBody = task.substring(task.indexOf(":") + 1).trim();
-
-					Consumer<String> handler = taskHandlers.get(taskName);
-					if (handler != null) {
-						handler.accept(taskBody);
-						logger.info(String.format("TASK '%s' completed", taskName));
-					}
+				Consumer<String> handler = taskHandlers.get(task.head);
+				if (handler != null) {
+					handler.accept(task.body);
+					logger.info(String.format("'%s' COMPLETED", task.toString()));
 				}
 
 			}
@@ -225,8 +211,7 @@ public class Client implements AutoCloseable {
 	public void waitForClose() {
 
 		try {
-			connectionThread.join();
-			readThread.join();
+			socketThread.join();
 			tasksThread.join();
 		} catch (InterruptedException e) {
 			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
@@ -237,14 +222,5 @@ public class Client implements AutoCloseable {
 	@Override
 	public void close() {
 		running.set(false);
-		synchronized (connectedMonitor) {
-			connectedMonitor.notifyAll();
-		}
-
-		try {
-			socket.close();
-		} catch (IOException e) {
-			logger.info("Client close failed: " + e.getMessage());
-		}
 	}
 }

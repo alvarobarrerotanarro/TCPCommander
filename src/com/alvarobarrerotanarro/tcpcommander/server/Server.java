@@ -4,9 +4,9 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
-import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,51 +21,33 @@ public class Server implements AutoCloseable {
 
 	private static final int ACCEPT_INTERVAL_MILLIS = 1000;
 	private static final int PING_INTERVAL_MILLIS = 1000;
+	private static final int PONG_TIMEOUT_MILLIS = 3000;
 
 	final private int port;
 	final private AtomicBoolean running;
 
 	final private ConcurrentHashMap<String, ClientConnection> clients;
 
-	final private ConcurrentHashMap<String, String> tasks;
-	final private Object tasksMonitor;
+	final private TasksContainer tasks;
 
 	final private Thread acceptThread;
+	final private Thread readThread;
+	final private Thread heartbeatThread;
 	final private Thread dispatchThread;
 
 	private final ConcurrentHashMap<EVENT, Consumer<Object>> eventHandlers;
 
 	final private Logger logger;
 
-	private class ClientConnection {
-		final Socket socket;
-		final PrintWriter writer;
-		final BufferedReader reader;
-
-		public ClientConnection(Socket socket, PrintWriter writer, BufferedReader reader) {
-			this.socket = socket;
-			this.writer = writer;
-			this.reader = reader;
-		}
-
-		@Override
-		public String toString() {
-			InetAddress addr = socket.getInetAddress();
-			String ipv4 = addr.getHostAddress();
-			int port = socket.getPort();
-
-			return String.format("%s:%d", ipv4, port);
-		}
-	}
-
 	public Server(int port) {
 		this.port = port;
-		this.running = new AtomicBoolean(true);
-		this.clients = new ConcurrentHashMap<>();
-		this.tasks = new ConcurrentHashMap<>();
-		this.tasksMonitor = new Object();
+		running = new AtomicBoolean(true);
+		clients = new ConcurrentHashMap<>();
+		tasks = new TasksContainer(running);
 
 		acceptThread = new Thread(this::acceptLoop, "tcpcommander-accept-thread");
+		readThread = new Thread(this::readLoop, "tcpcommander-read-thread");
+		heartbeatThread = new Thread(this::heartbeatLoop, "tcpcommander-heartbeat-loop");
 		dispatchThread = new Thread(this::dispatchLoop, "tcpcommander-ping-thread");
 
 		eventHandlers = new ConcurrentHashMap<>();
@@ -73,6 +55,8 @@ public class Server implements AutoCloseable {
 		logger = Logger.getLogger(Server.class.getName());
 
 		acceptThread.start();
+		readThread.start();
+		heartbeatThread.start();
 		dispatchThread.start();
 	}
 
@@ -108,6 +92,8 @@ public class Server implements AutoCloseable {
 	public void waitForClose() {
 		try {
 			acceptThread.join();
+			readThread.join();
+			heartbeatThread.join();
 			dispatchThread.join();
 		} catch (InterruptedException e) {
 			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
@@ -119,6 +105,7 @@ public class Server implements AutoCloseable {
 		BufferedReader clientReader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
 
 		ClientConnection client = new ClientConnection(clientSocket, clientWriter, clientReader);
+		client.pong();
 		clients.put(client.toString(), client);
 
 		dispatchEvent(EVENT.NEW_CLIENT, client.toString());
@@ -130,7 +117,6 @@ public class Server implements AutoCloseable {
 
 		try {
 			clientConnection.socket.close();
-
 		} catch (IOException e) {
 		}
 
@@ -144,22 +130,40 @@ public class Server implements AutoCloseable {
 		}
 	}
 
-	public void dispatchTask(String connectionName, String taskHeader, String taskBody) {
-		if (clients.get(connectionName) == null) {
+	/**
+	 * Blocks the current thread until the task is registered. Therefore two
+	 * consecutive calls to this method from the same thread will deadlock until the
+	 * first task was sent to the client.
+	 * 
+	 * @param connectionName
+	 * @param task
+	 */
+	public void addTask(String connectionName, Task task) {
+		ClientConnection clientConnection;
+
+		if ((clientConnection = clients.get(connectionName)) == null) {
 			return;
 		}
 
-		synchronized (tasksMonitor) {
-			try {
-				while (tasks.containsKey(connectionName)) {
-					tasksMonitor.wait();
-				}
+		try {
+			tasks.addTask(clientConnection, task);
+		} catch (InterruptedException e) {
+			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
+		}
+	}
 
-				tasks.put(connectionName, taskHeader + ":" + taskBody);
-				tasksMonitor.notifyAll();
-			} catch (InterruptedException e) {
+	private void dispatchTasks() {
+		Map<ClientConnection, Task> tasksMap = tasks.getPendingTasks();
 
-			}
+		for (var it = tasksMap.entrySet().iterator(); it.hasNext();) {
+			var pair = it.next();
+			ClientConnection clientConnection = pair.getKey();
+			Task task = pair.getValue();
+
+			clientConnection.writer.println(task);
+			logger.info(String.format("DISPATCH '%s'", task));
+
+			tasks.completeTask(clientConnection);
 		}
 	}
 
@@ -186,74 +190,65 @@ public class Server implements AutoCloseable {
 		}
 	}
 
-	public void ping() {
-		for (var it = clients.entrySet().iterator(); it.hasNext();) {
-			var pair = it.next();
-			String connectionName = pair.getKey();
-			ClientConnection clientConnection = pair.getValue();
+	private void readLoop() {
 
-			clientConnection.writer.println("ping");
-			logger.info("PING");
+		while (running.get()) {
 
-			if (clientConnection.writer.checkError()) {
-
-				removeClient(connectionName);
-				it.remove();
-
-			} else {
+			for (ClientConnection clientConnection : clients.values()) {
 
 				try {
 					String line = clientConnection.reader.readLine();
 
-					if (line == null || !line.equals("pong")) {
-						removeClient(connectionName);
-						it.remove();
+					if (line != null && line.equals("pong")) {
+						clientConnection.pong();
 					}
 
 				} catch (IOException e) {
-					logger.info(e.getMessage());
-					removeClient(connectionName);
-					it.remove();
+					logger.warning(e.getMessage());
 				}
 
 			}
+
 		}
+
 	}
 
-	private void dispatchTasks() {
-		for (var it = tasks.entrySet().iterator(); it.hasNext();) {
-			var pair = it.next();
-			String connectionName = pair.getKey();
-			String task = pair.getValue();
+	private void heartbeatLoop() {
 
-			ClientConnection clientConnection = clients.get(connectionName);
-			if (clientConnection != null) {
-				clientConnection.writer.println(task);
-				logger.info(String.format("TASK DISPATCH '%s'", task));
+		try {
+			while (running.get()) {
+
+				for (ClientConnection clientConnection : new ArrayList<>(clients.values())) {
+
+					if (System.currentTimeMillis() - clientConnection.getLastPong() < PONG_TIMEOUT_MILLIS) {
+						clientConnection.writer.println("ping");
+						logger.info("PING to " + clientConnection);
+					} else {
+						removeClient(clientConnection.toString());
+					}
+
+				}
+
+				Thread.sleep(PING_INTERVAL_MILLIS);
 			}
-
-			it.remove();
-
-			synchronized (tasksMonitor) {
-				tasksMonitor.notify();
-			}
+		} catch (InterruptedException e) {
+			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
 		}
+
 	}
 
 	private void dispatchLoop() {
 
 		try {
-
 			while (running.get()) {
-				ping();
-				dispatchTasks();
-				Thread.sleep(PING_INTERVAL_MILLIS);
-			}
 
-		} catch (InterruptedException e2) {
+				tasks.waitForTask();
+				dispatchTasks();
+
+			}
+		} catch (InterruptedException e) {
 			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
 		}
-
 	}
 
 	public String[] availableClients() {

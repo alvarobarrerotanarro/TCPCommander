@@ -47,9 +47,11 @@ public class ClientTest extends JFrame {
 
 	public void configClient() {
 		String portStr = JOptionPane.showInputDialog("Enter server port");
-		String ipAddr = JOptionPane.showInputDialog("Enter server IP");
 		int port = 3000;
 
+		String ipAddr = JOptionPane.showInputDialog("Enter server IP");
+
+		ipAddr = ipAddr == null || ipAddr.length() == 0 ? "localhost" : ipAddr;
 		try {
 			port = Integer.parseInt(portStr);
 		} catch (NumberFormatException e) {

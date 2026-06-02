@@ -1,27 +1,27 @@
 package test;
 
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.GridLayout;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 
 import javax.swing.AbstractListModel;
 import javax.swing.JButton;
 import javax.swing.JFrame;
+import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
 import javax.swing.JTextArea;
-import javax.swing.SwingUtilities;
+import javax.swing.SwingConstants;
 import javax.swing.WindowConstants;
 
 import com.alvarobarrerotanarro.tcpcommander.server.Server;
-import javax.swing.JPanel;
-import java.awt.GridLayout;
-import javax.swing.JLabel;
-import java.awt.BorderLayout;
-import javax.swing.SwingConstants;
-import java.awt.Font;
-import java.awt.Color;
-import java.awt.event.ActionListener;
-import java.awt.event.ActionEvent;
+import com.alvarobarrerotanarro.tcpcommander.server.Task;
 
 public class ServerTest extends JFrame {
 
@@ -110,11 +110,12 @@ public class ServerTest extends JFrame {
 	public void configServer() {
 		String portStr = JOptionPane.showInputDialog("Enter server port");
 		int port = 3000;
-		
+
 		try {
 			port = Integer.parseInt(portStr);
-		} catch (NumberFormatException e) {}
-		
+		} catch (NumberFormatException e) {
+		}
+
 		server = new Server(port);
 
 		server.addEventHandler(Server.EVENT.NEW_CLIENT, this::refreshConnectionList);
@@ -138,12 +139,12 @@ public class ServerTest extends JFrame {
 	public void sendMessage() {
 		String connectionName = (String) connectedClientsList.getSelectedValue();
 		String message = txtMessage.getText();
-		server.dispatchTask(connectionName, "msg", message);
+		server.addTask(connectionName, new Task("msg", message));
 	}
 
 	public void shutdown() {
 		String connectionName = (String) connectedClientsList.getSelectedValue();
-		server.dispatchTask(connectionName, "shutdown", "");
+		server.addTask(connectionName, new Task("shutdown"));
 	}
 
 	public static void main(String args[]) {
