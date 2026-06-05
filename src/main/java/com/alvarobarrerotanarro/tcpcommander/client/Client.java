@@ -17,8 +17,22 @@ import java.util.logging.Logger;
 
 import com.alvarobarrerotanarro.tcpcommander.server.Task;
 
+/**
+ * Cliente TCP persistente y reactivo con reconexión automática, monitorización
+ * de latido (ping/pong) y despacho asíncrono de tareas. *
+ * <p>
+ * Esta clase implementa {@link AutoCloseable} para permitir un apagado ordenado
+ * de sus hilos internos de red y procesamiento de tareas.
+ * </p>
+ */
 public class Client implements AutoCloseable {
+
+	/** Eventos del ciclo de vida del cliente notificables externamente. */
 	public static enum EVENT {
+		/**
+		 * Notificado cuando cambia el estado de conexión del socket
+		 * (conectado/desconectado).
+		 */
 		CONN_STATUS_CHANGE
 	}
 
@@ -37,6 +51,9 @@ public class Client implements AutoCloseable {
 	final private Thread socketThread;
 	final private Thread tasksThread;
 
+	/**
+	 * Cola con bloqueo que almacena las tareas parseadas pendientes de ejecución.
+	 */
 	final private BlockingQueue<Task> tasks;
 	final private Map<String, Consumer<String>> taskHandlers;
 
@@ -44,6 +61,16 @@ public class Client implements AutoCloseable {
 
 	final private Logger logger;
 
+	/**
+	 * Crea e inicializa una nueva instancia del Cliente TCP.
+	 * <p>
+	 * Inicia de manera inmediata dos hilos de ejecución internos independientes:
+	 * uno para la gestión de conexión/lectura y otro para el consumo de tareas.
+	 * </p>
+	 *
+	 * @param ipAddr Dirección IP o Hostname del servidor remoto.
+	 * @param port   Puerto TCP donde el servidor está escuchando.
+	 */
 	public Client(String ipAddr, int port) {
 		this.ipAddr = ipAddr;
 		this.port = port;
@@ -65,34 +92,76 @@ public class Client implements AutoCloseable {
 		tasksThread.start();
 	}
 
+	/**
+	 * Configura el nivel de detalle de las trazas de registro (Logs).
+	 *
+	 * @param lvl Nivel de logging deseado.
+	 */
 	public void setLoggingLevel(Level lvl) {
 		logger.setLevel(lvl);
 	}
 
+	/**
+	 * Informa el estado actual de la conexión de red con el servidor.
+	 *
+	 * @return true si el cliente está conectado activamente; false en caso contrario.
+	 */
 	public boolean isConnected() {
 		return connected.get();
 	}
 
+	/**
+	 * Comprueba si el cliente sigue en ejecución general.
+	 *
+	 * @return true si los bucles internos están activos; false si se ha invocado {@link #close()}.
+	 */
 	public boolean isRunning() {
 		return running.get();
 	}
 
+	/**
+	 * Permite forzar o alterar el estado de ejecución general del cliente.
+	 *
+	 * @param running Nuevo estado operativo del cliente.
+	 */
 	public void setRunning(boolean running) {
 		this.running.set(running);
 	}
 
+	/**
+	 * Registra un manejador para procesar un tipo específico de comando de tarea.
+	 *
+	 * @param taskName El valor del campo 'head' de la {@link Task} que disparará el manejador.
+	 * @param handler Callback que recibirá el campo 'body' de la tarea como argumento.
+	 */
 	public void addTaskHandler(String taskName, Consumer<String> handler) {
 		taskHandlers.put(taskName, handler);
 	}
 
+	/**
+	 * Elimina el manejador asociado a un comando de tarea concreto.
+	 *
+	 * @param taskName Nombre del identificador o cabecera a remover.
+	 */
 	public void removeTaskHandler(String taskName) {
 		taskHandlers.remove(taskName);
 	}
 
+	/**
+	 * Registra un callback para escuchar eventos del ciclo de vida del cliente.
+	 *
+	 * @param e Tipo de evento.
+	 * @param handler Callback que recibirá la información del evento (generalmente un Booleano).
+	 */
 	public void addEventHandler(EVENT e, Consumer<Object> handler) {
 		eventHandlers.put(e, handler);
 	}
 
+	/**
+	 * Elimina todos los manejadores vinculados a un evento específico.
+	 *
+	 * @param e Tipo de evento a limpiar.
+	 */
 	public void removeEventHandlers(EVENT e) {
 		eventHandlers.remove(e);
 	}
@@ -104,12 +173,20 @@ public class Client implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * Responde con una confirmación de latido ("pong") hacia el servidor.
+	 * * @return true si el mensaje se envió con éxito; false si se detectó un error en el flujo de salida.
+	 */
 	private boolean pong() {
 		writer.println("pong");
 		return !writer.checkError();
 	}
 
-	public void connectLoop() {
+	/**
+	 * Bucle principal de control del socket. Gestiona la instanciación de la conexión,
+	 * la inicialización de flujos de E/S y el intento cíclico de reconexión tras fallos.
+	 */
+	private void connectLoop() {
 
 		try {
 
@@ -146,6 +223,10 @@ public class Client implements AutoCloseable {
 
 	}
 
+	/**
+	 * Bucle de lectura persistente sobre el flujo de entrada del socket.
+	 * Interpreta los mensajes entrantes como señales "ping" o cadenas serializadas de tareas.
+	 */
 	private void readLoop() {
 
 		try {
@@ -189,7 +270,11 @@ public class Client implements AutoCloseable {
 
 	}
 
-	public void tasksLoop() {
+	/**
+	 * Bucle de procesamiento de tareas. Consume de forma bloqueante la cola interna,
+	 * localiza el manejador de negocio adecuado mediante el campo 'head' y lo ejecuta.
+	 */
+	private void tasksLoop() {
 		try {
 			while (running.get()) {
 
@@ -208,6 +293,10 @@ public class Client implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * Bloquea el hilo invocador hasta que los hilos internos de red y tareas 
+	 * finalicen por completo su ejecución.
+	 */
 	public void waitForClose() {
 
 		try {
@@ -219,6 +308,10 @@ public class Client implements AutoCloseable {
 
 	}
 
+	/**
+	 * Detiene de manera formal la ejecución del cliente enviando la señal de apagado 
+	 * a los bucles concurrentes.
+	 */
 	@Override
 	public void close() {
 		running.set(false);

@@ -14,12 +14,33 @@ import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+/**
+ * TCP Server for managing persistent client connections and task dispatching.
+ *
+ * <p>
+ * This server maintains multiple TCP clients, supports a heartbeat mechanism
+ * (ping/pong), and allows sending asynchronous tasks to connected clients.
+ * </p>
+ *
+ * <p>
+ * Main features:
+ * </p>
+ * <ul>
+ * <li>Multi-client TCP handling</li>
+ * <li>Automatic client lifecycle management</li>
+ * <li>Task dispatching system</li>
+ * <li>Heartbeat (ping/pong) connection monitoring</li>
+ * <li>Event system for client connection changes</li>
+ * </ul>
+ */
 public class Server implements AutoCloseable {
+	/**
+	 * Events triggered by the server lifecycle.
+	 */
 	public static enum EVENT {
 		NEW_CLIENT, FORGOTTEN_CLIENT
 	}
 
-	private static final int ACCEPT_INTERVAL_MILLIS = 1000;
 	private static final int PING_INTERVAL_MILLIS = 1000;
 	private static final int PONG_TIMEOUT_MILLIS = 3000;
 
@@ -39,6 +60,21 @@ public class Server implements AutoCloseable {
 
 	final private Logger logger;
 
+	/**
+	 * Creates and starts a new TCP server.
+	 *
+	 * <p>
+	 * Once instantiated, the server immediately starts internal threads:
+	 * </p>
+	 * <ul>
+	 * <li>Connection accept loop</li>
+	 * <li>Client read loop</li>
+	 * <li>Heartbeat monitor loop</li>
+	 * <li>Task dispatch loop</li>
+	 * </ul>
+	 *
+	 * @param port TCP port where the server will listen for connections
+	 */
 	public Server(int port) {
 		this.port = port;
 		running = new AtomicBoolean(true);
@@ -60,35 +96,87 @@ public class Server implements AutoCloseable {
 		dispatchThread.start();
 	}
 
+	/**
+	 * Returns the TCP port used by the server.
+	 *
+	 * @return port number
+	 */
 	public int getPort() {
 		return port;
 	}
 
+	/**
+	 * Sets logging verbosity level.
+	 *
+	 * @param lvl desired logging level
+	 */
 	public void setLoggingLevel(Level lvl) {
 		logger.setLevel(lvl);
 	}
 
+	/**
+	 * Checks whether the server is currently running.
+	 *
+	 * @return true if running, false otherwise
+	 */
 	public boolean isRunning() {
 		return running.get();
 	}
 
+	/**
+	 * Enables or disables the server execution flag.
+	 *
+	 * <p>
+	 * Note: This does NOT immediately stop threads, but signals them to terminate
+	 * gracefully.
+	 * </p>
+	 *
+	 * @param running new running state
+	 */
 	public void setRunning(boolean running) {
 		this.running.set(running);
 	}
 
+	/**
+	 * Registers an event handler for server events.
+	 *
+	 * @param e       event type
+	 * @param handler callback executed when event occurs
+	 */
 	public void addEventHandler(EVENT e, Consumer<Object> handler) {
 		eventHandlers.put(e, handler);
 	}
 
+	/**
+	 * Removes the handler associated with the given event.
+	 *
+	 * @param e event type to remove
+	 */
 	public void removeEventHandlers(EVENT e) {
 		eventHandlers.remove(e);
 	}
+
+	/**
+	 * Gracefully stops the server execution.
+	 *
+	 * <p>
+	 * This sets the internal running flag to false, allowing threads to terminate
+	 * naturally.
+	 * </p>
+	 */
 
 	@Override
 	public void close() {
 		running.set(false);
 	}
 
+	/**
+	 * Blocks the current thread until all internal server threads finish execution.
+	 *
+	 * <p>
+	 * This should be called after {@link #close()} to ensure clean shutdown.
+	 * </p>
+	 */
 	public void waitForClose() {
 		try {
 			acceptThread.join();
@@ -131,12 +219,15 @@ public class Server implements AutoCloseable {
 	}
 
 	/**
-	 * Blocks the current thread until the task is registered. Therefore two
-	 * consecutive calls to this method from the same thread will deadlock until the
-	 * first task was sent to the client.
-	 * 
-	 * @param connectionName
-	 * @param task
+	 * Sends a task to a specific client.
+	 *
+	 * <p>
+	 * This method blocks until the task is accepted by the internal queue. Calling
+	 * it repeatedly from the same thread may cause deadlocks.
+	 * </p>
+	 *
+	 * @param connectionName identifier of the target client
+	 * @param task           task to execute remotely
 	 */
 	public void addTask(String connectionName, Task task) {
 		ClientConnection clientConnection;
@@ -181,12 +272,8 @@ public class Server implements AutoCloseable {
 				logger.warning(e.getMessage());
 			}
 
-			Thread.sleep(ACCEPT_INTERVAL_MILLIS);
-
 		} catch (IOException e2) {
 			logger.severe(String.format("Server socket open failed: %s\n", e2.getMessage()));
-		} catch (InterruptedException e2) {
-			logger.info(String.format("Interrupted signal in '%s'", Thread.currentThread().getName()));
 		}
 	}
 
@@ -251,6 +338,11 @@ public class Server implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * Returns a snapshot of all currently connected clients.
+	 *
+	 * @return array of client identifiers
+	 */
 	public String[] availableClients() {
 		String clientConnections[] = new String[clients.size()];
 		int clientConnectoinsPos = 0;

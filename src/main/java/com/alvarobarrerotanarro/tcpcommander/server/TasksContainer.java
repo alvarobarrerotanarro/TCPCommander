@@ -4,7 +4,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class TasksContainer {
+class TasksContainer {
 	private final Map<ClientConnection, Task> pending;
 	private AtomicBoolean serverRunningState;
 
